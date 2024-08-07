@@ -1,29 +1,23 @@
-require('dotenv').config();
 const express = require('express');
-const bodyParser = require('body-parser');
+const axios = require('axios');
+
 const app = express();
-app.use(bodyParser.urlencoded({ extended: false }));
+const PORT = process.env.PORT || 3000;
 
-const accountSid = process.env.TWILIO_ACCOUNT_SID;
-const authToken = process.env.TWILIO_AUTH_TOKEN;
-const client = require('twilio')(accountSid, authToken);
+app.get('/notify', async (req, res) => {
+  try {
+    // Hacer solicitudes a ambos enlaces
+    await Promise.all([
+      axios.get('https://organized-calm-chatter.glitch.me/notify'),
+      axios.get('https://curved-disco-lasagna.glitch.me/notify')
+    ]);
 
-app.get('/notify', (req, res) => {
-  const message = 'Tocaron el timbre';
-  client.messages.create({
-    body: message,
-    from: `${process.env.TWILIO_PHONE_NUMBER}`,
-    to: '+541160505888' // Cambia los números según sea necesario
-  })
-  .then(message => {
-    res.send('Notificación enviada');
-  })
-  .catch(err => {
-    res.status(500).send(err);
-  });
+    res.send('Notificaciones enviadas a ambos enlaces');
+  } catch (error) {
+    res.status(500).send('Error al enviar notificaciones');
+  }
 });
 
-const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
 });
