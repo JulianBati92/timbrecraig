@@ -1,8 +1,8 @@
 {
   "name": "timbrecraig",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "private": true,
-  "description": "Timbre QR seguro con registro de visitantes y notificaciones en tiempo real",
+  "description": "Timbre QR seguro con registro de visitantes y notificaciones por Trello",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -14,6 +14,7 @@
     "dotenv": "^16.4.5",
     "express": "^4.21.2",
     "express-rate-limit": "^7.4.1",
-    "helmet": "^8.0.0"
+    "helmet": "^8.0.0",
+    "qrcode": "^1.5.4"
   }
 }
