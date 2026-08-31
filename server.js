@@ -9,17 +9,40 @@ const QRCode = require('qrcode');
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const HOME_ID = process.env.HOME_ID || 'casa';
-const MAX_VISITS = 100;
-const visits = [];
 
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
-app.use(helmet({ contentSecurityPolicy: { directives: { defaultSrc: ["'self'"], styleSrc: ["'self'", "'unsafe-inline'"], scriptSrc: ["'self'"], imgSrc: ["'self'", 'data:'], connectSrc: ["'self'"] } } }));
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      scriptSrc: ["'self'", "'unsafe-inline'"],
+      imgSrc: ["'self'", 'data:'],
+      connectSrc: ["'self'"],
+      frameAncestors: ["'none'"]
+    }
+  },
+  referrerPolicy: { policy: 'no-referrer' }
+}));
 app.use(express.json({ limit: '8kb' }));
 app.use(express.urlencoded({ extended: false, limit: '8kb' }));
 
-const limiter = rateLimit({ windowMs: 60_000, limit: 30, standardHeaders: 'draft-7', legacyHeaders: false });
-const ringLimiter = rateLimit({ windowMs: 5 * 60_000, limit: 5, standardHeaders: 'draft-7', legacyHeaders: false, message: { error: 'Demasiados llamados. Esperá unos minutos e intentá nuevamente.' } });
+const limiter = rateLimit({
+  windowMs: 60_000,
+  limit: 30,
+  standardHeaders: 'draft-7',
+  legacyHeaders: false
+});
+
+const ringLimiter = rateLimit({
+  windowMs: 5 * 60_000,
+  limit: 5,
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  message: { error: 'Demasiados llamados. Esperá unos minutos e intentá nuevamente.' }
+});
+
 app.use('/api', limiter);
 
 function clean(value, max = 120) {
@@ -30,16 +53,27 @@ function clean(value, max = 120) {
 function publicBaseUrl(req) {
   const configured = clean(process.env.PUBLIC_BASE_URL, 500).replace(/\/$/, '');
   if (configured) return configured;
-  return `${req.protocol}://${req.get('host')}`;
+
+  const proto = clean(req.headers['x-forwarded-proto'], 20) || req.protocol || 'https';
+  const host = clean(req.headers['x-forwarded-host'], 255) || clean(req.get('host'), 255);
+  if (!host) throw new Error('Unable to determine public host');
+  return `${proto.split(',')[0]}://${host.split(',')[0]}`;
 }
 
 async function verifyTurnstile(token, ip) {
   const secret = process.env.TURNSTILE_SECRET_KEY;
   if (!secret) return true;
   if (!token) return false;
+
   const body = new URLSearchParams({ secret, response: token });
   if (ip) body.set('remoteip', ip);
-  const response = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', { method: 'POST', body, signal: AbortSignal.timeout(5000) });
+
+  const response = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
+    method: 'POST',
+    body,
+    signal: AbortSignal.timeout(5000)
+  });
+  if (!response.ok) return false;
   const data = await response.json();
   return data.success === true;
 }
@@ -53,41 +87,105 @@ async function notifyTrello(visit) {
   const token = process.env.TRELLO_TOKEN;
   const idList = process.env.TRELLO_LIST_ID;
   if (!key || !token || !idList) return false;
-  const params = new URLSearchParams({ key, token, idList, name: `🔔 ${visit.name || 'Alguien'} está en la puerta`, desc: visitText(visit), pos: 'top' });
-  const response = await fetch(`https://api.trello.com/1/cards?${params.toString()}`, { method: 'POST', signal: AbortSignal.timeout(7000) });
+
+  const params = new URLSearchParams({
+    key,
+    token,
+    idList,
+    name: `🔔 ${visit.name || 'Alguien'} está en la puerta`,
+    desc: visitText(visit),
+    pos: 'top'
+  });
+
+  const response = await fetch(`https://api.trello.com/1/cards?${params.toString()}`, {
+    method: 'POST',
+    signal: AbortSignal.timeout(7000)
+  });
   if (!response.ok) throw new Error(`Trello notification failed (${response.status})`);
   return true;
 }
 
-async function notifyOwner(visit) {
-  const results = await Promise.allSettled([
-    notifyTrello(visit),
-    (async () => {
-      const token = process.env.TELEGRAM_BOT_TOKEN;
-      const chatId = process.env.TELEGRAM_CHAT_ID;
-      if (!token || !chatId) return false;
-      const response = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ chat_id: chatId, text: visitText(visit) }), signal: AbortSignal.timeout(7000) });
-      if (!response.ok) throw new Error('Telegram notification failed');
-      return true;
-    })(),
-    (async () => {
-      const webhook = process.env.NOTIFICATION_WEBHOOK_URL;
-      if (!webhook) return false;
-      const response = await fetch(webhook, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ event: 'doorbell.ring', visit }), signal: AbortSignal.timeout(7000) });
-      if (!response.ok) throw new Error('Webhook notification failed');
-      return true;
-    })()
-  ]);
-  const configured = Boolean(process.env.TRELLO_API_KEY && process.env.TRELLO_TOKEN && process.env.TRELLO_LIST_ID) || Boolean(process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID) || Boolean(process.env.NOTIFICATION_WEBHOOK_URL);
-  if (configured && !results.some(r => r.status === 'fulfilled' && r.value === true)) throw new Error('All configured notification providers failed');
+async function notifyTelegram(visit) {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  const chatId = process.env.TELEGRAM_CHAT_ID;
+  if (!token || !chatId) return false;
+
+  const response = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ chat_id: chatId, text: visitText(visit) }),
+    signal: AbortSignal.timeout(7000)
+  });
+  if (!response.ok) throw new Error(`Telegram notification failed (${response.status})`);
+  return true;
 }
 
-app.get('/api/health', (_req, res) => res.json({ ok: true, service: 'timbrecraig', version: '2.1.0' }));
-app.get('/api/config', (req, res) => res.json({ homeId: HOME_ID, doorbellUrl: `${publicBaseUrl(req)}/r/${encodeURIComponent(HOME_ID)}`, turnstileSiteKey: process.env.TURNSTILE_SITE_KEY || null }));
+async function notifyWebhook(visit) {
+  const webhook = process.env.NOTIFICATION_WEBHOOK_URL;
+  if (!webhook) return false;
+
+  const response = await fetch(webhook, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ event: 'doorbell.ring', visit }),
+    signal: AbortSignal.timeout(7000)
+  });
+  if (!response.ok) throw new Error(`Webhook notification failed (${response.status})`);
+  return true;
+}
+
+async function notifyOwner(visit) {
+  const configuredProviders = [
+    Boolean(process.env.TRELLO_API_KEY && process.env.TRELLO_TOKEN && process.env.TRELLO_LIST_ID),
+    Boolean(process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID),
+    Boolean(process.env.NOTIFICATION_WEBHOOK_URL)
+  ];
+
+  if (!configuredProviders.some(Boolean)) {
+    const error = new Error('No notification provider configured');
+    error.code = 'NOTIFICATION_NOT_CONFIGURED';
+    throw error;
+  }
+
+  const results = await Promise.allSettled([
+    notifyTrello(visit),
+    notifyTelegram(visit),
+    notifyWebhook(visit)
+  ]);
+
+  if (!results.some(result => result.status === 'fulfilled' && result.value === true)) {
+    throw new Error('All configured notification providers failed');
+  }
+}
+
+app.get('/api/health', (_req, res) => {
+  const trelloConfigured = Boolean(process.env.TRELLO_API_KEY && process.env.TRELLO_TOKEN && process.env.TRELLO_LIST_ID);
+  res.json({
+    ok: true,
+    service: 'timbrecraig',
+    version: '2.2.0',
+    notificationsConfigured: trelloConfigured || Boolean(process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID) || Boolean(process.env.NOTIFICATION_WEBHOOK_URL),
+    trelloConfigured
+  });
+});
+
+app.get('/api/config', (req, res) => {
+  res.json({
+    homeId: HOME_ID,
+    doorbellUrl: `${publicBaseUrl(req)}/r/${encodeURIComponent(HOME_ID)}`,
+    turnstileSiteKey: process.env.TURNSTILE_SITE_KEY || null
+  });
+});
+
 app.get('/api/qr', async (req, res) => {
   try {
     const doorbellUrl = `${publicBaseUrl(req)}/r/${encodeURIComponent(HOME_ID)}`;
-    const svg = await QRCode.toString(doorbellUrl, { type: 'svg', errorCorrectionLevel: 'H', margin: 2, width: 720 });
+    const svg = await QRCode.toString(doorbellUrl, {
+      type: 'svg',
+      errorCorrectionLevel: 'H',
+      margin: 2,
+      width: 720
+    });
     res.type('image/svg+xml').set('Cache-Control', 'no-store').send(svg);
   } catch (error) {
     console.error('qr_error', { message: error.message });
@@ -102,21 +200,54 @@ app.get('/qr', (req, res) => {
 
 app.post('/api/homes/:homeId/ring', ringLimiter, async (req, res) => {
   try {
-    if (req.params.homeId !== HOME_ID) return res.status(404).json({ error: 'Timbre no encontrado.' });
+    if (req.params.homeId !== HOME_ID) {
+      return res.status(404).json({ error: 'Timbre no encontrado.' });
+    }
+
     const allowedReasons = ['Visita', 'Entrega', 'Correo', 'Técnico', 'Otro'];
     const name = clean(req.body.name, 80);
     const reason = clean(req.body.reason, 30) || 'Visita';
     const message = clean(req.body.message, 300);
     const phone = clean(req.body.phone, 40);
-    if (!allowedReasons.includes(reason)) return res.status(400).json({ error: 'Motivo inválido.' });
-    if (phone && !/^[+0-9 ()-]{6,40}$/.test(phone)) return res.status(400).json({ error: 'Teléfono inválido.' });
+
+    if (!allowedReasons.includes(reason)) {
+      return res.status(400).json({ error: 'Motivo inválido.' });
+    }
+    if (phone && !/^[+0-9 ()-]{6,40}$/.test(phone)) {
+      return res.status(400).json({ error: 'Teléfono inválido.' });
+    }
+
     const human = await verifyTurnstile(clean(req.body.turnstileToken, 2048), req.ip);
-    if (!human) return res.status(403).json({ error: 'No pudimos validar la solicitud.' });
-    const visit = { id: crypto.randomUUID(), homeId: HOME_ID, name, reason, message, phone, status: 'waiting', createdAt: new Date().toISOString() };
-    visits.unshift(visit);
-    if (visits.length > MAX_VISITS) visits.length = MAX_VISITS;
-    try { await notifyOwner(visit); } catch (error) { console.error('notification_error', { visitId: visit.id, message: error.message }); }
-    return res.status(201).json({ ok: true, visitId: visit.id, message: 'Avisamos que estás en la puerta.' });
+    if (!human) {
+      return res.status(403).json({ error: 'No pudimos validar la solicitud.' });
+    }
+
+    const visit = {
+      id: crypto.randomUUID(),
+      homeId: HOME_ID,
+      name,
+      reason,
+      message,
+      phone,
+      status: 'waiting',
+      createdAt: new Date().toISOString()
+    };
+
+    try {
+      await notifyOwner(visit);
+    } catch (error) {
+      console.error('notification_error', { visitId: visit.id, message: error.message });
+      if (error.code === 'NOTIFICATION_NOT_CONFIGURED') {
+        return res.status(503).json({ error: 'El timbre todavía no tiene configurado el canal de aviso.' });
+      }
+      return res.status(502).json({ error: 'No pudimos entregar el aviso. Intentá nuevamente.' });
+    }
+
+    return res.status(201).json({
+      ok: true,
+      visitId: visit.id,
+      message: 'Avisamos que estás en la puerta.'
+    });
   } catch (error) {
     console.error('ring_error', { message: error.message });
     return res.status(500).json({ error: 'No pudimos enviar el aviso. Intentá nuevamente.' });
@@ -131,4 +262,8 @@ app.get('/r/:homeId', (req, res) => {
 app.use('/api', (_req, res) => res.status(404).json({ error: 'Ruta no encontrada.' }));
 app.use((_err, _req, res, _next) => res.status(500).json({ error: 'Error interno.' }));
 
-app.listen(PORT, () => console.log(`TimbreCraig v2.1 escuchando en puerto ${PORT}`));
+module.exports = app;
+
+if (require.main === module) {
+  app.listen(PORT, () => console.log(`TimbreCraig v2.2 escuchando en puerto ${PORT}`));
+}
