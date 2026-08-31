@@ -1,41 +1,24 @@
-# 🔔 TimbreCraig v2
+# 🔔 TimbreCraig v2.3
 
-TimbreCraig convierte un QR colocado en la puerta en un timbre digital. El visitante escanea el QR, toca el timbre y opcionalmente deja nombre, motivo, teléfono y mensaje. El propietario recibe el aviso mediante Telegram o un webhook configurable.
+TimbreCraig convierte un QR colocado en la puerta en un timbre digital. El visitante escanea el QR, toca el timbre y opcionalmente deja nombre, motivo, teléfono y mensaje. El propietario recibe el aviso directamente en su celular mediante ntfy.
 
 ## Flujo
 
-`QR → /r/:homeId → visitante toca el timbre → API valida → rate limit → notificación`
+`QR → TimbreCraig → API valida → ntfy → celular`
 
 ## Funciones
 
-- Interfaz mobile-first y accesible.
+- Interfaz mobile-first.
 - Timbre rápido sin completar formulario.
 - Nombre, motivo, teléfono y mensaje opcionales.
-- Motivos predefinidos para evitar contenido arbitrario.
-- Avisos por Telegram y/o webhook.
+- Notificación push inmediata mediante ntfy.
+- Prioridad máxima para los avisos del timbre.
+- QR dinámico generado por el backend.
+- Página `/qr` preparada para abrir o imprimir el código.
 - PWA instalable.
-- Endpoint de healthcheck.
+- Healthcheck en `/api/health`.
 - Identificador de vivienda configurable.
-- Registro temporal de las últimas visitas en memoria (máximo 100).
-
-## Seguridad
-
-- `helmet` y Content Security Policy.
-- `X-Powered-By` deshabilitado.
-- Límite global de solicitudes y límite estricto para tocar el timbre.
-- Body limitado a 8 KB.
-- Validación de campos, longitudes y teléfono.
-- Sanitización de caracteres de control/HTML.
-- IDs de visita generados con `crypto.randomUUID()`.
-- Credenciales exclusivamente mediante variables de entorno.
-- `.env` ignorado por Git.
-- Timeouts para proveedores externos.
-- Mensajes de error públicos sin stack traces ni secretos.
-- Cloudflare Turnstile opcional para protección anti-bot.
-- El webhook no recibe el teléfono del visitante por defecto.
-- Los endpoints antiguos con URLs Glitch hardcodeadas fueron eliminados.
-
-> Nota: el almacenamiento en memoria es intencional para el MVP y se pierde al reiniciar. Para producción con historial/panel se recomienda PostgreSQL/Supabase con autenticación del propietario y políticas de retención.
+- Sin base de datos ni almacenamiento permanente de datos del visitante.
 
 ## Instalación
 
@@ -47,52 +30,68 @@ npm start
 
 Requiere Node.js 20 o superior.
 
-Abrí `http://localhost:3000/r/casa` (o reemplazá `casa` por el valor configurado en `HOME_ID`).
+Abrí `http://localhost:3000/r/casa`. El QR está disponible en `http://localhost:3000/qr`.
 
-## Telegram
+## Avisos al celular con ntfy
 
-Creá un bot con BotFather, obtené el token y configurá:
-
-```env
-TELEGRAM_BOT_TOKEN=...
-TELEGRAM_CHAT_ID=...
-```
-
-Nunca subas el `.env` al repositorio.
-
-## Webhook
-
-Para integrar n8n, Make u otro servicio:
+1. Instalá la aplicación ntfy en el celular receptor.
+2. Elegí un topic privado, largo y aleatorio.
+3. Suscribí el celular a ese mismo topic.
+4. Configurá en el backend:
 
 ```env
-NOTIFICATION_WEBHOOK_URL=https://tu-endpoint-seguro.example/webhook
+NTFY_SERVER=https://ntfy.sh
+NTFY_TOPIC=tu-topic-privado-y-aleatorio
 ```
 
-El webhook recibe `event: doorbell.ring` y los datos no sensibles de la visita.
+No hace falta guardar un número telefónico en TimbreCraig. El celular que esté suscripto al topic recibe el aviso.
 
-## Turnstile
+`NTFY_TOKEN` queda disponible para una futura instalación de ntfy con autenticación, pero no es necesario para el uso básico con un topic público aleatorio.
 
-En producción es recomendable activar Cloudflare Turnstile. Configurá `TURNSTILE_SITE_KEY` y `TURNSTILE_SECRET_KEY`. Si se define la clave secreta, el servidor rechazará solicitudes que no tengan una validación válida. La integración visual del widget debe añadirse al frontend antes de habilitar el secret.
+## Seguridad
+
+- Helmet y Content Security Policy.
+- `X-Powered-By` deshabilitado.
+- Rate limit general y límite específico para el timbre.
+- Body limitado a 8 KB.
+- Validación y sanitización de campos.
+- IDs de visita generados con `crypto.randomUUID()`.
+- El topic de ntfy se mantiene como variable de entorno y no se envía al navegador.
+- Timeouts para servicios externos.
+- Sin credenciales hardcodeadas en el repositorio.
+- Sin dependencia de los antiguos servidores Glitch, Twilio o Trello.
+
+> Un topic de `ntfy.sh` sin autenticación debe tratarse como un secreto: usá un valor largo, aleatorio y difícil de adivinar. Para mayor privacidad puede migrarse más adelante a una instancia propia de ntfy con autenticación.
+
+## Vercel
+
+Variables mínimas:
+
+```env
+HOME_ID=casa
+NTFY_SERVER=https://ntfy.sh
+NTFY_TOPIC=tu-topic-privado-y-aleatorio
+```
+
+`PUBLIC_BASE_URL` puede quedar vacío en Vercel porque TimbreCraig detecta el host público automáticamente.
+
+No configures todavía `TURNSTILE_SECRET_KEY`: el backend lo soporta, pero el widget del frontend debe integrarse antes de habilitar esa validación.
 
 ## QR
 
-El QR debe apuntar a la URL pública de la vivienda:
+Una vez desplegado:
 
 ```text
-https://tu-dominio.example/r/casa
+https://tu-dominio/qr
 ```
 
-No pongas números telefónicos, tokens ni datos privados dentro del QR.
+muestra el QR para imprimir. El código apunta automáticamente a:
 
-## Próxima etapa
+```text
+https://tu-dominio/r/casa
+```
 
-- PostgreSQL/Supabase para persistencia real.
-- Login seguro del propietario.
-- Panel privado con historial y estados `waiting/attended/ignored`.
-- Push notifications Web Push.
-- Múltiples viviendas/usuarios con IDs aleatorios no enumerables.
-- Retención y borrado automático de datos personales.
-- Tests automatizados y CI.
+No pongas el número telefónico, el topic de ntfy ni ningún token dentro del QR.
 
 ## Licencia
 
