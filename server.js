@@ -79,93 +79,67 @@ async function verifyTurnstile(token, ip) {
 }
 
 function visitText(visit) {
-  return `🔔 TimbreCraig\nHay alguien en la puerta.\n👤 ${visit.name || 'Visitante'}\n📌 ${visit.reason}\n📞 ${visit.phone || 'No informado'}\n💬 ${visit.message || 'Sin mensaje'}\n🕐 ${new Date(visit.createdAt).toLocaleString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' })}\nID: ${visit.id}`;
+  return [
+    `👤 ${visit.name || 'Visitante'}`,
+    `📌 ${visit.reason}`,
+    `📞 ${visit.phone || 'No informado'}`,
+    `💬 ${visit.message || 'Sin mensaje'}`,
+    `🕐 ${new Date(visit.createdAt).toLocaleString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' })}`
+  ].join('\n');
 }
 
-async function notifyTrello(visit) {
-  const key = process.env.TRELLO_API_KEY;
-  const token = process.env.TRELLO_TOKEN;
-  const idList = process.env.TRELLO_LIST_ID;
-  if (!key || !token || !idList) return false;
-
-  const params = new URLSearchParams({
-    key,
-    token,
-    idList,
-    name: `🔔 ${visit.name || 'Alguien'} está en la puerta`,
-    desc: visitText(visit),
-    pos: 'top'
-  });
-
-  const response = await fetch(`https://api.trello.com/1/cards?${params.toString()}`, {
-    method: 'POST',
-    signal: AbortSignal.timeout(7000)
-  });
-  if (!response.ok) throw new Error(`Trello notification failed (${response.status})`);
-  return true;
+function ntfyConfig() {
+  const server = clean(process.env.NTFY_SERVER || 'https://ntfy.sh', 500).replace(/\/$/, '');
+  const topic = clean(process.env.NTFY_TOPIC, 64);
+  const token = clean(process.env.NTFY_TOKEN, 500);
+  return { server, topic, token };
 }
 
-async function notifyTelegram(visit) {
-  const token = process.env.TELEGRAM_BOT_TOKEN;
-  const chatId = process.env.TELEGRAM_CHAT_ID;
-  if (!token || !chatId) return false;
-
-  const response = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ chat_id: chatId, text: visitText(visit) }),
-    signal: AbortSignal.timeout(7000)
-  });
-  if (!response.ok) throw new Error(`Telegram notification failed (${response.status})`);
-  return true;
-}
-
-async function notifyWebhook(visit) {
-  const webhook = process.env.NOTIFICATION_WEBHOOK_URL;
-  if (!webhook) return false;
-
-  const response = await fetch(webhook, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ event: 'doorbell.ring', visit }),
-    signal: AbortSignal.timeout(7000)
-  });
-  if (!response.ok) throw new Error(`Webhook notification failed (${response.status})`);
-  return true;
-}
-
-async function notifyOwner(visit) {
-  const configuredProviders = [
-    Boolean(process.env.TRELLO_API_KEY && process.env.TRELLO_TOKEN && process.env.TRELLO_LIST_ID),
-    Boolean(process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID),
-    Boolean(process.env.NOTIFICATION_WEBHOOK_URL)
-  ];
-
-  if (!configuredProviders.some(Boolean)) {
-    const error = new Error('No notification provider configured');
+async function notifyNtfy(visit) {
+  const { server, topic, token } = ntfyConfig();
+  if (!topic) {
+    const error = new Error('NTFY_TOPIC is not configured');
     error.code = 'NOTIFICATION_NOT_CONFIGURED';
     throw error;
   }
 
-  const results = await Promise.allSettled([
-    notifyTrello(visit),
-    notifyTelegram(visit),
-    notifyWebhook(visit)
-  ]);
+  if (!/^[-_A-Za-z0-9]{1,64}$/.test(topic)) {
+    const error = new Error('NTFY_TOPIC has an invalid format');
+    error.code = 'NOTIFICATION_NOT_CONFIGURED';
+    throw error;
+  }
 
-  if (!results.some(result => result.status === 'fulfilled' && result.value === true)) {
-    throw new Error('All configured notification providers failed');
+  const headers = {
+    'content-type': 'application/json'
+  };
+  if (token) headers.authorization = `Bearer ${token}`;
+
+  const response = await fetch(`${server}/`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      topic,
+      title: '🔔 Hay alguien en la puerta',
+      message: visitText(visit),
+      priority: 5,
+      tags: ['door', 'bell']
+    }),
+    signal: AbortSignal.timeout(7000)
+  });
+
+  if (!response.ok) {
+    throw new Error(`ntfy notification failed (${response.status})`);
   }
 }
 
 app.get('/api/health', (_req, res) => {
-  const trelloConfigured = Boolean(process.env.TRELLO_API_KEY && process.env.TRELLO_TOKEN && process.env.TRELLO_LIST_ID);
+  const { topic } = ntfyConfig();
   res.json({
     ok: true,
     service: 'timbrecraig',
-    version: '2.2.0',
-    notificationsConfigured: trelloConfigured || Boolean(process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID) || Boolean(process.env.NOTIFICATION_WEBHOOK_URL),
-    trelloConfigured
+    version: '2.3.0',
+    notificationsConfigured: Boolean(topic),
+    provider: 'ntfy'
   });
 });
 
@@ -229,18 +203,17 @@ app.post('/api/homes/:homeId/ring', ringLimiter, async (req, res) => {
       reason,
       message,
       phone,
-      status: 'waiting',
       createdAt: new Date().toISOString()
     };
 
     try {
-      await notifyOwner(visit);
+      await notifyNtfy(visit);
     } catch (error) {
       console.error('notification_error', { visitId: visit.id, message: error.message });
       if (error.code === 'NOTIFICATION_NOT_CONFIGURED') {
-        return res.status(503).json({ error: 'El timbre todavía no tiene configurado el canal de aviso.' });
+        return res.status(503).json({ error: 'El timbre todavía no tiene configurado el celular receptor.' });
       }
-      return res.status(502).json({ error: 'No pudimos entregar el aviso. Intentá nuevamente.' });
+      return res.status(502).json({ error: 'No pudimos entregar el aviso al celular. Intentá nuevamente.' });
     }
 
     return res.status(201).json({
@@ -254,6 +227,7 @@ app.post('/api/homes/:homeId/ring', ringLimiter, async (req, res) => {
   }
 });
 
+app.get('/', (_req, res) => res.redirect(302, `/r/${encodeURIComponent(HOME_ID)}`));
 app.use(express.static(path.join(__dirname, 'public'), { maxAge: '1h', etag: true }));
 app.get('/r/:homeId', (req, res) => {
   if (req.params.homeId !== HOME_ID) return res.status(404).send('Timbre no encontrado');
@@ -265,5 +239,5 @@ app.use((_err, _req, res, _next) => res.status(500).json({ error: 'Error interno
 module.exports = app;
 
 if (require.main === module) {
-  app.listen(PORT, () => console.log(`TimbreCraig v2.2 escuchando en puerto ${PORT}`));
+  app.listen(PORT, () => console.log(`TimbreCraig v2.3 escuchando en puerto ${PORT}`));
 }
